@@ -19,7 +19,7 @@
 1. The installed component “Kernel modules for the Netfilter subsystem” (available without “IPv6 protocol” starting with software version 4.3).
 
 ### Installation:
-1. Execute the command `opkg update && opkg install curl && curl -fsSL https://raw.githubusercontent.com/dimon27254/antiscan/refs/heads/main/install.sh | sh`
+1. Execute the command `opkg update && opkg install curl && curl -fsSL https://raw.githubusercontent.com/karayelxyz/keenetic-antiscan/refs/heads/main/install.sh | sh`
 2. Specify the Unix names of Internet connection interfaces in the file `“/opt/etc/antiscan/ascn.conf”`. In software version 4.3 and above, Unix interface names can be viewed using the command `show interface {interface} system-name`.
 3. Configure the remaining parameters to suit your needs, if necessary, in the file `“/opt/etc/antiscan/ascn.conf”`.
 4. Start Antiscan with the command `antiscan start`
