@@ -1,0 +1,247 @@
+#!/bin/sh
+
+ANTISCAN_DIR="/opt/etc/antiscan"
+CRONTAB_FILE="$ANTISCAN_DIR/ascn_crontab.conf"
+
+ANTISCAN_SCRIPTS_DIR="$ANTISCAN_DIR/scripts"
+
+ASCN_TEMP_FILE="/tmp/ascn.run"
+ASCN_VERSION="1.10"
+
+PATH=/opt/bin:/opt/sbin:/sbin:/usr/sbin:/bin:/usr/bin
+
+source "${ANTISCAN_SCRIPTS_DIR}/geo.sh"
+source "${ANTISCAN_SCRIPTS_DIR}/log.sh"
+source "${ANTISCAN_SCRIPTS_DIR}/config.sh"
+source "${ANTISCAN_SCRIPTS_DIR}/iptables.sh"
+source "${ANTISCAN_SCRIPTS_DIR}/ipsets.sh"
+source "${ANTISCAN_SCRIPTS_DIR}/show_data.sh"
+
+read_config "$1"
+
+start() {
+  if ascn_is_running; then
+    print_message "error" "Antiscan is already running"
+    exit 1
+  else
+    if config_is_reloading; then
+      print_message "error" "Antiscan startup is not possible while configuration update is in progress"
+      exit 2
+    fi
+
+    if geo_is_loading; then
+      print_message "error" "Antiscan startup is not possible while country subnet lists are being updated"
+      exit 2
+    fi
+
+    update_cron
+    load_kernel_modules
+    write_temp_config
+    create_ipsets
+    add_rules
+    create_status_file
+
+    show_no_protection_warning
+    print_message "notice" "Antiscan started"
+  fi
+}
+
+stop() {
+  if ! ascn_is_running; then
+    print_message "error" "Antiscan is not running"
+  else
+
+    if config_is_reloading; then
+      print_message "error" "Antiscan cannot be stopped while configuration update is in progress"
+      exit 2
+    fi
+
+    if geo_is_loading; then
+      print_message "error" "Antiscan cannot be stopped while country subnet lists are being updated"
+      exit 2
+    fi
+
+    if [ "$SAVE_ON_EXIT" == "1" ] || [ "$1" == "1" ]; then
+      export_ipsets
+    fi
+
+    remove_rules
+    destroy_ipsets
+    destroy_temp_config
+    remove_status_file
+    print_message "notice" "Antiscan stopped"
+  fi
+}
+
+create_status_file() {
+  echo "1" >"$ASCN_TEMP_FILE"
+}
+
+remove_status_file() {
+  if ascn_is_running; then
+    rm "$ASCN_TEMP_FILE"
+  fi
+}
+
+ascn_is_running() {
+  if [ -f "$ASCN_TEMP_FILE" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+all_protections_disabled() {
+  if [ "$ENABLE_HONEYPOT" != "1" ] && [ "$ENABLE_IPS_BAN" != "1" ] && [ "$CUSTOM_LISTS_BLOCK_MODE" != "blacklist" ] && [ "$CUSTOM_LISTS_BLOCK_MODE" != "whitelist" ] &&
+    [ "$GEOBLOCK_MODE" != "blacklist" ] && [ "$GEOBLOCK_MODE" != "whitelist" ] && [ "$READ_NDM_LOCKOUT_IPSETS" != "1" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+show_no_protection_warning() {
+  all_protections_disabled && print_message "warning" "All Antiscan protection types are disabled by the user" 1
+}
+
+update_cron() {
+  crontab_bin="/opt/bin/crontab"
+  if [ -f "$crontab_bin" ]; then
+    if [ -s "$CRONTAB_FILE" ]; then
+      if [ ! -d "/opt/var/spool/cron/crontabs" ]; then
+        print_message "error" "Something went wrong while reading the crontab task list. Is cron configured?"
+      else
+        local tasks_from_crontab="$(crontab -l | grep 'S99ascn')"
+        local tasks_from_file="$(grep 'S99ascn' "$CRONTAB_FILE")"
+        if [ "$tasks_from_crontab" != "$tasks_from_file" ]; then
+          print_message "notice" "Updating crontab"
+          crontab -l | sed '/S99ascn/d; /# DO/d; /# (/d' >"/tmp/crontasks"
+          echo "$tasks_from_file" >>"/tmp/crontasks"
+          if ! crontab "/tmp/crontasks"; then
+            print_message "error" "Something went wrong while updating crontab :("
+          fi
+          rm "/tmp/crontasks"
+        fi
+      fi
+    else
+      print_message "error" "Cannot update crontab! The ascn_crontab.conf file is empty."
+    fi
+  else
+    print_message "error" "crontab not found! Is cron installed?"
+  fi
+}
+
+edit_file() {
+  local file_to_open=""
+  case "$1" in
+  config | conf)
+    file_to_open="$CONFIG_FILE"
+    ;;
+  crontab | cron)
+    file_to_open="$CRONTAB_FILE"
+    ;;
+  custom_exclude | custom_whitelist | custom_blacklist)
+    file_to_open="$ANTISCAN_DIR/ascn_$1.txt"
+    ;;
+  *)
+    print_message "console" "Usage: $0 edit {config|crontab|custom_exclude|custom_blacklist|custom_whitelist}"
+    exit 1
+    ;;
+  esac
+  if [ -f "/opt/bin/nano" ]; then
+    nano "$file_to_open"
+  elif [ -f "/opt/bin/vim" ]; then
+    vim "$file_to_open"
+  elif [ -f "/opt/bin/vi" ]; then
+    vi "$file_to_open"
+  else
+    print_message "error" "Failed to find a supported text editor"
+    exit 1
+  fi
+  local editor_exitcode="$?"
+  if [ "$editor_exitcode" == "0" ]; then
+    if [ "$file_to_open" == "$CONFIG_FILE" ]; then
+      (
+        source "$CONFIG_FILE"
+        check_config
+      )
+      local check_result="$?"
+      if ascn_is_running && [ "$check_result" == "0" ]; then
+        if [ -f "$CONFIG_FILE_TEMP" ]; then
+          source "$CONFIG_FILE_TEMP"
+        else
+          source "$CONFIG_FILE"
+        fi
+        reload_config
+      fi
+    elif [ "$file_to_open" == "$CRONTAB_FILE" ]; then
+      update_cron
+    else
+      update_ipsets "custom"
+    fi
+  fi
+}
+
+case "$1" in
+start)
+  start
+  ;;
+stop)
+  stop
+  ;;
+restart)
+  stop 1
+  start
+  ;;
+status)
+  get_status
+  ;;
+list)
+  show_ipsets "$2"
+  ;;
+reload)
+  reload_config
+  ;;
+flush)
+  flush_ipsets "$2"
+  ;;
+update_rules)
+  update_iptables
+  ;;
+read_candidates | read)
+  read_ip_candidates
+  ;;
+read_ndm_ipsets | read_ndm)
+  read_ndm_ipsets
+  ;;
+save_ipsets | save)
+  export_ipsets
+  ;;
+update_ipsets)
+  update_ipsets "$2"
+  ;;
+update_crontab)
+  update_cron
+  ;;
+retry_load_geo)
+  retry_load_geo
+  ;;
+version)
+  show_version
+  ;;
+version_opkg)
+  show_version "opkg"
+  ;;
+edit)
+  edit_file "$2"
+  ;;
+config | conf)
+  edit_file "config"
+  ;;
+crontab | cron)
+  edit_file "crontab"
+  ;;
+*)
+  print_message "console" "Usage: $0 {start|stop|restart|status|list|reload|flush|version|edit|update_rules|read_candidates|read_ndm_ipsets|save_ipsets|update_ipsets|update_crontab}"
+  ;;
+esac
